@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -174,7 +175,7 @@ func findRequiredModuleVersion(modFile *modfile.File, modulePath string) (module
 }
 
 func resolveModuleOriginForSpec(ctx context.Context, mod moduleSpec, shortHash string) (bool, error) {
-	tmpRepo, err := os.MkdirTemp("", "validate-api-go-version-*")
+	tmpRepo, err := os.MkdirTemp("", "check-dependencies-*")
 	if err != nil {
 		return false, fmt.Errorf("failed to create temp repo dir: %w", err)
 	}
@@ -186,6 +187,14 @@ func resolveModuleOriginForSpec(ctx context.Context, mod moduleSpec, shortHash s
 		return false, fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	err = exec.CommandContext(ctx, "git", "-C", tmpRepo, "merge-base", "--is-ancestor", shortHash, "refs/heads/"+mod.defaultBranch).Run()
-	return err == nil, nil
+	out, err = exec.CommandContext(ctx, "git", "-C", tmpRepo, "merge-base", "--is-ancestor", shortHash, "refs/heads/"+mod.defaultBranch).CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	fmt.Printf("git merge-base --is-ancestor output: %s\n", strings.TrimSpace(string(out)))
+	return false, fmt.Errorf("git merge-base --is-ancestor failed: %w", err)
 }
