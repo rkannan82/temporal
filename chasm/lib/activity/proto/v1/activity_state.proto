@@ -100,6 +100,13 @@ message ActivityState {
     // and on each options update that re-schedules the task). Unlike attempt.stamp, this counter
     // is NOT incremented on retries, because schedule-to-close spans the full activity lifetime.
     int32 stamp = 14;
+
+    // Set when reset was requested while the activity was running.
+    // On the next retry, TransitionRescheduled will reset the attempt count to 1 before incrementing.
+    bool activity_reset = 15;
+
+    // Set alongside activity_reset when heartbeat details should be cleared on the next retry.
+    bool reset_heartbeats = 16;
 }
 
 message ActivityCancelState {
