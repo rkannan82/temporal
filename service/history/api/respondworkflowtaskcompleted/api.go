@@ -597,6 +597,7 @@ func (handler *WorkflowTaskCompletedHandler) Invoke(
 				workflowLease.GetContext().UpdateRegistry(ctx),
 				false,
 				nil,
+				0,
 			)
 			if err != nil {
 				return nil, err
@@ -722,6 +723,7 @@ func (handler *WorkflowTaskCompletedHandler) Invoke(
 			workflowLease.GetContext().UpdateRegistry(ctx),
 			false,
 			nil,
+			0,
 		)
 		if err != nil {
 			return nil, err
