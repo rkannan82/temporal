@@ -346,6 +346,10 @@ func (w *WorkerCommandsPartition) IsChild() bool {
 	return false
 }
 
+func (w *WorkerCommandsPartition) IsEphemeral() bool {
+	return true
+}
+
 func (w *WorkerCommandsPartition) RpcName() string {
 	return w.name
 }
