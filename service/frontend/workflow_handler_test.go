@@ -289,6 +289,74 @@ func (s *WorkflowHandlerSuite) TestPollForTask_Failed_ContextTimeoutTooShort() {
 	s.Equal(common.ErrContextTimeoutTooShort, err)
 }
 
+func (s *WorkflowHandlerSuite) TestPollWorkflowTaskQueue_CompletedByWorkerShutdown() {
+	config := s.newConfig()
+	wh := s.getWorkflowHandler(config)
+
+	namespaceEntry := namespace.NewLocalNamespaceForTest(
+		&persistencespb.NamespaceInfo{Id: testNamespaceID, Name: "test-namespace"},
+		nil,
+		"",
+	)
+	s.mockNamespaceCache.EXPECT().GetNamespace(namespace.Name("test-namespace")).Return(namespaceEntry, nil)
+	s.mockMatchingClient.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any()).Return(
+		&matchingservice.PollWorkflowTaskQueueResponse{
+			CompletedByWorkerShutdown: true,
+		}, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	resp, err := wh.PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
+		Namespace: "test-namespace",
+		TaskQueue: &taskqueuepb.TaskQueue{Name: "test-tq"},
+	})
+	s.NoError(err)
+	s.True(resp.GetCompletedByWorkerShutdown())
+}
+
+func (s *WorkflowHandlerSuite) TestPollActivityTaskQueue_CompletedByWorkerShutdown() {
+	config := s.newConfig()
+	wh := s.getWorkflowHandler(config)
+
+	s.mockNamespaceCache.EXPECT().GetNamespaceID(namespace.Name("test-namespace")).Return(namespace.ID(testNamespaceID), nil)
+	s.mockMatchingClient.EXPECT().PollActivityTaskQueue(gomock.Any(), gomock.Any()).Return(
+		&matchingservice.PollActivityTaskQueueResponse{
+			CompletedByWorkerShutdown: true,
+		}, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	resp, err := wh.PollActivityTaskQueue(ctx, &workflowservice.PollActivityTaskQueueRequest{
+		Namespace: "test-namespace",
+		TaskQueue: &taskqueuepb.TaskQueue{Name: "test-tq"},
+	})
+	s.NoError(err)
+	s.True(resp.GetCompletedByWorkerShutdown())
+}
+
+func (s *WorkflowHandlerSuite) TestPollNexusTaskQueue_CompletedByWorkerShutdown() {
+	config := s.newConfig()
+	wh := s.getWorkflowHandler(config)
+
+	s.mockNamespaceCache.EXPECT().GetNamespaceID(namespace.Name("test-namespace")).Return(namespace.ID(testNamespaceID), nil)
+	s.mockMatchingClient.EXPECT().PollNexusTaskQueue(gomock.Any(), gomock.Any()).Return(
+		&matchingservice.PollNexusTaskQueueResponse{
+			CompletedByWorkerShutdown: true,
+		}, nil,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	resp, err := wh.PollNexusTaskQueue(ctx, &workflowservice.PollNexusTaskQueueRequest{
+		Namespace: "test-namespace",
+		TaskQueue: &taskqueuepb.TaskQueue{Name: "test-tq"},
+	})
+	s.NoError(err)
+	s.True(resp.GetCompletedByWorkerShutdown())
+}
+
 func (s *WorkflowHandlerSuite) TestStartWorkflowExecution_Failed_StartRequestNotSet() {
 	config := s.newConfig()
 	config.RPS = dc.GetIntPropertyFn(10)

@@ -1134,7 +1134,8 @@ func (wh *WorkflowHandler) PollWorkflowTaskQueue(ctx context.Context, request *w
 		StartedTime:                matchingResp.StartedTime,
 		Queries:                    matchingResp.Queries,
 		Messages:                   matchingResp.Messages,
-		PollerScalingDecision:      matchingResp.PollerScalingDecision,
+		PollerScalingDecision:         matchingResp.PollerScalingDecision,
+		CompletedByWorkerShutdown: matchingResp.CompletedByWorkerShutdown,
 	}, nil
 }
 
@@ -1372,6 +1373,7 @@ func (wh *WorkflowHandler) PollActivityTaskQueue(ctx context.Context, request *w
 		PollerScalingDecision:       matchingResponse.PollerScalingDecision,
 		Priority:                    matchingResponse.Priority,
 		RetryPolicy:                 matchingResponse.RetryPolicy,
+		CompletedByWorkerShutdown:   matchingResponse.CompletedByWorkerShutdown,
 	}, nil
 }
 
@@ -6025,7 +6027,12 @@ func (wh *WorkflowHandler) PollNexusTaskQueue(ctx context.Context, request *work
 		return nil, err
 	}
 
-	return matchingResponse.GetResponse(), nil
+	resp := matchingResponse.GetResponse()
+	if resp == nil {
+		resp = &workflowservice.PollNexusTaskQueueResponse{}
+	}
+	resp.CompletedByWorkerShutdown = matchingResponse.CompletedByWorkerShutdown
+	return resp, nil
 }
 
 func (wh *WorkflowHandler) RespondNexusTaskCompleted(ctx context.Context, request *workflowservice.RespondNexusTaskCompletedRequest) (_ *workflowservice.RespondNexusTaskCompletedResponse, retError error) {
