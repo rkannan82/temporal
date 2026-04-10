@@ -63,11 +63,12 @@ func GetPerTaskQueuePartitionIDScope(
 		} else {
 			value = normal
 		}
+	case *tqid.StickyPartition:
+		value = sticky
 	case *tqid.WorkerCommandsPartition:
 		value = workerCommands
-		taskQueueBreakdown = false
 	default:
-		value = sticky
+		value = unknownValue
 	}
 
 	return GetPerTaskQueueScope(handler, namespaceName, partition.TaskQueue(), taskQueueBreakdown,
@@ -89,11 +90,12 @@ func GetPerTaskQueuePartitionTypeScope(
 		value = unknownValue
 	case *tqid.NormalPartition:
 		value = normal
+	case *tqid.StickyPartition:
+		value = sticky
 	case *tqid.WorkerCommandsPartition:
 		value = workerCommands
-		taskQueueBreakdown = false
 	default:
-		value = sticky
+		value = unknownValue
 	}
 
 	return GetPerTaskQueueScope(handler, namespaceName, partition.TaskQueue(), taskQueueBreakdown,
