@@ -88,6 +88,14 @@ type (
 		taskQueue  *TaskQueue
 	}
 
+	// WorkerCommandsPartition is used for server-to-worker communication (e.g. activity cancellations).
+	// These queues are per-worker and only exist for the lifetime of the worker process. The SDK sets
+	// Kind=TASK_QUEUE_KIND_WORKER_COMMANDS when polling on these queues.
+	WorkerCommandsPartition struct {
+		name      string
+		taskQueue *TaskQueue
+	}
+
 	// PartitionKey uniquely identifies a task queue partition, to be used in maps.
 	// Note that task queue kind (sticky vs normal) and normal name for sticky task queues are not
 	// part of the task queue partition identity.
@@ -101,6 +109,7 @@ type (
 
 var _ Partition = (*NormalPartition)(nil)
 var _ Partition = (*StickyPartition)(nil)
+var _ Partition = (*WorkerCommandsPartition)(nil)
 
 var (
 	ErrNoParent      = errors.New("root task queue partition has no parent")
@@ -139,6 +148,9 @@ func UnsafePartitionFromProto(proto *taskqueuepb.TaskQueue, namespaceId string, 
 	case enumspb.TASK_QUEUE_KIND_STICKY:
 		tq := &TaskQueue{TaskQueueFamily{namespaceId, proto.GetNormalName()}, taskType}
 		return tq.StickyPartition(proto.GetName())
+	case enumspb.TASK_QUEUE_KIND_WORKER_COMMANDS:
+		tq := &TaskQueue{TaskQueueFamily{namespaceId, proto.GetName()}, taskType}
+		return tq.WorkerCommandsPartition(proto.GetName())
 	default:
 		tq := &TaskQueue{TaskQueueFamily{namespaceId, proto.GetName()}, taskType}
 		return tq.RootPartition()
@@ -164,6 +176,12 @@ func PartitionFromProto(proto *taskqueuepb.TaskQueue, namespaceId string, taskTy
 		}
 		tq := &TaskQueue{TaskQueueFamily{namespaceId, normalName}, taskType}
 		return tq.StickyPartition(baseName), nil
+	case enumspb.TASK_QUEUE_KIND_WORKER_COMMANDS:
+		if partition != 0 {
+			return nil, serviceerror.NewInvalidArgumentf("worker-commands partitions cannot have non-zero partition ID. base name: %s", baseName)
+		}
+		tq := &TaskQueue{TaskQueueFamily{namespaceId, baseName}, taskType}
+		return tq.WorkerCommandsPartition(baseName), nil
 	default:
 		tq := &TaskQueue{TaskQueueFamily{namespaceId, baseName}, taskType}
 		return tq.NormalPartition(partition), nil
@@ -239,6 +257,10 @@ func (n *TaskQueue) StickyPartition(stickyName string) *StickyPartition {
 	return &StickyPartition{stickyName, n}
 }
 
+func (n *TaskQueue) WorkerCommandsPartition(name string) *WorkerCommandsPartition {
+	return &WorkerCommandsPartition{name, n}
+}
+
 func (n *TaskQueue) RootPartition() *NormalPartition {
 	return n.NormalPartition(0)
 }
@@ -297,6 +319,51 @@ func (s *StickyPartition) RoutingKey(int) (string, int) {
 
 func (s *StickyPartition) GradualChangeKey() []byte {
 	key := fmt.Sprintf("%s:%s:%d", s.NamespaceId(), s.RpcName(), s.TaskType())
+	return []byte(key)
+}
+
+func (w *WorkerCommandsPartition) TaskType() enumspb.TaskQueueType {
+	return w.taskQueue.TaskType()
+}
+
+func (w *WorkerCommandsPartition) Kind() enumspb.TaskQueueKind {
+	return enumspb.TASK_QUEUE_KIND_WORKER_COMMANDS
+}
+
+func (w *WorkerCommandsPartition) NamespaceId() string {
+	return w.taskQueue.family.NamespaceId()
+}
+
+func (w *WorkerCommandsPartition) TaskQueue() *TaskQueue {
+	return w.taskQueue
+}
+
+func (w *WorkerCommandsPartition) IsRoot() bool {
+	return false
+}
+
+func (w *WorkerCommandsPartition) IsChild() bool {
+	return false
+}
+
+func (w *WorkerCommandsPartition) RpcName() string {
+	return w.name
+}
+
+func (w *WorkerCommandsPartition) Key() PartitionKey {
+	return PartitionKey{
+		namespaceId: w.NamespaceId(),
+		name:        w.name,
+		taskType:    w.TaskType(),
+	}
+}
+
+func (w *WorkerCommandsPartition) RoutingKey(int) (string, int) {
+	return fmt.Sprintf("%s:%s:%d", w.NamespaceId(), w.RpcName(), w.TaskType()), 0
+}
+
+func (w *WorkerCommandsPartition) GradualChangeKey() []byte {
+	key := fmt.Sprintf("%s:%s:%d", w.NamespaceId(), w.RpcName(), w.TaskType())
 	return []byte(key)
 }
 

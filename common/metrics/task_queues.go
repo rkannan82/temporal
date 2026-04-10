@@ -7,9 +7,10 @@ import (
 )
 
 const (
-	omitted = "__omitted__"
-	normal  = "__normal__"
-	sticky  = "__sticky__"
+	omitted        = "__omitted__"
+	normal         = "__normal__"
+	sticky         = "__sticky__"
+	workerCommands = "__worker_commands__"
 )
 
 // GetPerTaskQueueFamilyScope returns "namespace" and "taskqueue" tags. "taskqueue" will be "__omitted__" if
@@ -53,15 +54,19 @@ func GetPerTaskQueuePartitionIDScope(
 	tags ...Tag,
 ) Handler {
 	var value string
-	if partition == nil {
+	switch p := partition.(type) {
+	case nil:
 		value = unknownValue
-	} else if normalPartition, ok := partition.(*tqid.NormalPartition); ok {
+	case *tqid.NormalPartition:
 		if partitionIDBreakdown {
-			value = strconv.Itoa(normalPartition.PartitionId())
+			value = strconv.Itoa(p.PartitionId())
 		} else {
 			value = normal
 		}
-	} else {
+	case *tqid.WorkerCommandsPartition:
+		value = workerCommands
+		taskQueueBreakdown = false
+	default:
 		value = sticky
 	}
 
@@ -70,7 +75,7 @@ func GetPerTaskQueuePartitionIDScope(
 }
 
 // GetPerTaskQueuePartitionTypeScope returns GetPerTaskQueueScope scope plus a "partition" tag which
-// can be "__normal__", "__sticky__", or "_unknown_".
+// can be "__normal__", "__sticky__", "__worker_commands__", or "_unknown_".
 func GetPerTaskQueuePartitionTypeScope(
 	handler Handler,
 	namespaceName string,
@@ -79,11 +84,15 @@ func GetPerTaskQueuePartitionTypeScope(
 	tags ...Tag,
 ) Handler {
 	var value string
-	if partition == nil {
+	switch partition.(type) {
+	case nil:
 		value = unknownValue
-	} else if _, ok := partition.(*tqid.NormalPartition); ok {
+	case *tqid.NormalPartition:
 		value = normal
-	} else {
+	case *tqid.WorkerCommandsPartition:
+		value = workerCommands
+		taskQueueBreakdown = false
+	default:
 		value = sticky
 	}
 
