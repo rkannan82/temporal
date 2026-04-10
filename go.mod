@@ -59,7 +59,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.40.0
 	go.opentelemetry.io/otel/sdk/metric v1.40.0
 	go.opentelemetry.io/otel/trace v1.40.0
-	go.temporal.io/api v1.62.8-0.20260406230818-5423d0dd678a
+	go.temporal.io/api v1.62.3-0.20260409181818-debaf76d420a
 	go.temporal.io/auto-scaled-workers v0.0.0-20260407181057-edd947d743d2
 	go.temporal.io/sdk v1.41.1
 	go.uber.org/fx v1.24.0
@@ -157,7 +157,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/mock v1.6.0 // indirect
+	github.com/golang/mock v1.6.0
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.7 // indirect
@@ -216,5 +216,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace go.temporal.io/api => /Users/shivamsaraf/Desktop/work/api-go
