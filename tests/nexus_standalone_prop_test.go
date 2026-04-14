@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
+	nexuspb "go.temporal.io/api/nexus/v1"
 	"go.temporal.io/api/serviceerror"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -21,29 +22,35 @@ import (
 	"go.temporal.io/server/tests/testcore/umpire"
 )
 
-// Nexus-specific typed facts for the umpire.
+type nexusTaskKind string
 
-type nexusStartTask struct{ OperationID string }
+const (
+	nexusTaskKindStart  nexusTaskKind = "start"
+	nexusTaskKindCancel nexusTaskKind = "cancel"
+)
 
-func (f *nexusStartTask) Key() string { return f.OperationID }
+type nexusTaskOutcome string
 
-type nexusCancelTask struct{ OperationID string }
+const (
+	nexusTaskOutcomeDispatched nexusTaskOutcome = "dispatched"
+	nexusTaskOutcomeCompleted  nexusTaskOutcome = "completed"
+	nexusTaskOutcomeFailed     nexusTaskOutcome = "failed"
+)
 
-func (f *nexusCancelTask) Key() string { return f.OperationID }
+type nexusTaskEvent struct {
+	OperationID string
+	Kind        nexusTaskKind
+	Outcome     nexusTaskOutcome
+}
 
-type nexusTaskCompleted struct{ OperationID string }
-
-func (f *nexusTaskCompleted) Key() string { return f.OperationID }
-
-type nexusTaskFailed struct{ OperationID string }
-
-func (f *nexusTaskFailed) Key() string { return f.OperationID }
+func (e *nexusTaskEvent) Key() string { return e.OperationID }
 
 type modelOpStatus int
 
 const (
 	modelStatusRunning modelOpStatus = iota
 	modelStatusCompleted
+	modelStatusCanceled
 	modelStatusFailed
 	modelStatusTerminated
 )
@@ -72,11 +79,9 @@ var propIterCounter atomic.Int64
 func TestNexusStandaloneProp(t *testing.T) {
 	t.Parallel()
 
-	u, icpt := umpire.New[*nexusPropModel]()
+	u := &umpire.Umpire{}
 
-	env := newNexusTestEnv(t, false, append(nexusStandaloneOpts,
-		testcore.WithServerInterceptor(icpt),
-	)...)
+	env := newNexusTestEnv(t, false, nexusStandaloneOpts...)
 	taskQueue := "prop-test-tq"
 	endpointName := env.createNexusEndpoint(t, testcore.RandomizedNexusEndpoint(t.Name()), taskQueue).Spec.Name
 
@@ -95,24 +100,6 @@ func TestNexusStandaloneProp(t *testing.T) {
 		m.startPoller(ctx)
 		m.Run(t)
 	})
-}
-
-// ObserveTraffic records poll responses as umpire facts. Called on a zero-value
-// receiver during setup — must not access model fields. Completion/failure
-// facts are recorded by the Do* actions which have the operation ID directly.
-func (*nexusPropModel) ObserveTraffic(u *umpire.Umpire, _ context.Context, _ string, _, resp any, err error) {
-	if err != nil {
-		return
-	}
-	pollResp, ok := resp.(*workflowservice.PollNexusTaskQueueResponse)
-	if !ok || pollResp.GetTaskToken() == nil {
-		return
-	}
-	if start := pollResp.GetRequest().GetStartOperation(); start != nil {
-		u.Record(&nexusStartTask{OperationID: start.GetRequestId()})
-	} else if cancel := pollResp.GetRequest().GetCancelOperation(); cancel != nil {
-		u.Record(&nexusCancelTask{OperationID: cancel.GetOperationToken()})
-	}
 }
 
 func (m *nexusPropModel) DoStartOperation() {
@@ -137,46 +124,65 @@ func (m *nexusPropModel) DoStartOperation() {
 // DoPollAndComplete polls for a nexus task and responds with success.
 func (m *nexusPropModel) DoPollAndComplete() {
 	resp := m.pollTask()
-	if resp == nil {
-		m.T().Skip("no task available")
-	}
 
 	if start := resp.GetRequest().GetStartOperation(); start != nil {
 		op := m.ops[start.GetRequestId()]
 		require.NotNil(m.T(), op, "unknown operation %s", start.GetRequestId())
-		require.NoError(m.T(), m.env.respondNexusStartOperationSyncSuccess(
-			m.env.Context(), resp.TaskToken, &commonpb.Payload{}, nil))
-		m.Umpire.Record(&nexusTaskCompleted{OperationID: start.GetRequestId()})
+		_, err := m.env.FrontendClient().RespondNexusTaskCompleted(m.env.Context(), &workflowservice.RespondNexusTaskCompletedRequest{
+			Namespace: m.env.Namespace().String(),
+			Identity:  uuid.NewString(),
+			TaskToken: resp.TaskToken,
+			Response: &nexuspb.Response{
+				Variant: &nexuspb.Response_StartOperation{
+					StartOperation: &nexuspb.StartOperationResponse{
+						Variant: &nexuspb.StartOperationResponse_SyncSuccess{
+							SyncSuccess: &nexuspb.StartOperationResponse_Sync{
+								Payload: &commonpb.Payload{},
+							},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(m.T(), err)
+		m.recordTask(start.GetRequestId(), nexusTaskKindStart, nexusTaskOutcomeCompleted)
 		op.status = modelStatusCompleted
 		return
 	}
 
 	if cancel := resp.GetRequest().GetCancelOperation(); cancel != nil {
-		require.NoError(m.T(), m.env.respondNexusCancelOperationCompleted(
-			m.env.Context(), resp.TaskToken))
-		m.Umpire.Record(&nexusTaskCompleted{OperationID: cancel.GetOperationToken()})
+		op := m.ops[cancel.GetOperationToken()]
+		require.NotNil(m.T(), op, "unknown operation %s", cancel.GetOperationToken())
+		_, err := m.env.FrontendClient().RespondNexusTaskCompleted(m.env.Context(), &workflowservice.RespondNexusTaskCompletedRequest{
+			Namespace: m.env.Namespace().String(),
+			Identity:  uuid.NewString(),
+			TaskToken: resp.TaskToken,
+			Response: &nexuspb.Response{
+				Variant: &nexuspb.Response_CancelOperation{
+					CancelOperation: &nexuspb.CancelOperationResponse{},
+				},
+			},
+		})
+		require.NoError(m.T(), err)
+		m.recordTask(cancel.GetOperationToken(), nexusTaskKindCancel, nexusTaskOutcomeCompleted)
+		op.status = modelStatusCanceled
 	}
 }
 
 // DoPollAndFail polls for a nexus task and responds with a retryable handler error.
 func (m *nexusPropModel) DoPollAndFail() {
 	resp := m.pollTask()
-	if resp == nil {
-		m.T().Skip("no task available")
-	}
 
-	var opID string
 	if start := resp.GetRequest().GetStartOperation(); start != nil {
-		opID = start.GetRequestId()
+		m.recordTask(start.GetRequestId(), nexusTaskKindStart, nexusTaskOutcomeFailed)
 	} else if cancel := resp.GetRequest().GetCancelOperation(); cancel != nil {
-		opID = cancel.GetOperationToken()
+		m.recordTask(cancel.GetOperationToken(), nexusTaskKindCancel, nexusTaskOutcomeFailed)
 	}
 	require.NoError(m.T(), m.env.respondNexusTaskFailed(m.env.Context(), resp.TaskToken, &nexus.HandlerError{
 		Type:          nexus.HandlerErrorTypeInternal,
 		RetryBehavior: nexus.HandlerErrorRetryBehaviorRetryable,
 		Message:       "prop-test retryable handler error",
 	}))
-	m.Umpire.Record(&nexusTaskFailed{OperationID: opID})
 }
 
 func (m *nexusPropModel) DoTerminateOperation() {
@@ -257,8 +263,16 @@ func (m *nexusPropModel) CheckInvariant() {
 	}
 }
 
+func (m *nexusPropModel) recordTask(operationID string, kind nexusTaskKind, outcome nexusTaskOutcome) {
+	m.Umpire.Record(&nexusTaskEvent{
+		OperationID: operationID,
+		Kind:        kind,
+		Outcome:     outcome,
+	})
+}
+
 // startPoller runs a background goroutine that continuously polls for nexus
-// tasks and sends them to the tasks channel.
+// tasks and queues them for task-processing actions.
 func (m *nexusPropModel) startPoller(ctx context.Context) {
 	go func() {
 		for ctx.Err() == nil {
@@ -275,37 +289,28 @@ func (m *nexusPropModel) startPoller(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err != nil {
+			if err != nil || resp.GetTaskToken() == nil {
 				continue
 			}
-			if resp.GetTaskToken() != nil {
-				m.tasks <- resp
+			if start := resp.GetRequest().GetStartOperation(); start != nil {
+				m.recordTask(start.GetRequestId(), nexusTaskKindStart, nexusTaskOutcomeDispatched)
+			} else if cancelReq := resp.GetRequest().GetCancelOperation(); cancelReq != nil {
+				m.recordTask(cancelReq.GetOperationToken(), nexusTaskKindCancel, nexusTaskOutcomeDispatched)
 			}
+			m.tasks <- resp
 		}
 	}()
 }
 
-// pollTask returns the next available task from the background poller,
-// or nil if none is available.
+// pollTask waits briefly for a task from the background poller.
 func (m *nexusPropModel) pollTask() *workflowservice.PollNexusTaskQueueResponse {
 	select {
 	case resp := <-m.tasks:
 		return resp
-	default:
+	case <-time.After(2 * time.Second):
+		m.T().Skip("no task available")
 		return nil
 	}
-}
-
-func (m *nexusPropModel) handleDeletedOp(err error, op *modelOp) bool {
-	if op.status != modelStatusTerminated && op.status != modelStatusCompleted && op.status != modelStatusFailed {
-		return false
-	}
-	var notFoundErr *serviceerror.NotFound
-	if !errors.As(err, &notFoundErr) {
-		return false
-	}
-	delete(m.ops, op.operationID)
-	return true
 }
 
 func (m *nexusPropModel) Cleanup() {
@@ -346,6 +351,21 @@ func (m *nexusPropModel) Cleanup() {
 			return errors.As(err, &notFoundErr)
 		}, 10*time.Second, 200*time.Millisecond)
 	}
+}
+
+func (m *nexusPropModel) handleDeletedOp(err error, op *modelOp) bool {
+	if op.status != modelStatusTerminated &&
+		op.status != modelStatusCompleted &&
+		op.status != modelStatusCanceled &&
+		op.status != modelStatusFailed {
+		return false
+	}
+	var notFoundErr *serviceerror.NotFound
+	if !errors.As(err, &notFoundErr) {
+		return false
+	}
+	delete(m.ops, op.operationID)
+	return true
 }
 
 func (m *nexusPropModel) hasRunningOps() bool {
@@ -398,6 +418,8 @@ func toProtoStatus(s modelOpStatus) enumspb.NexusOperationExecutionStatus {
 		return enumspb.NEXUS_OPERATION_EXECUTION_STATUS_RUNNING
 	case modelStatusCompleted:
 		return enumspb.NEXUS_OPERATION_EXECUTION_STATUS_COMPLETED
+	case modelStatusCanceled:
+		return enumspb.NEXUS_OPERATION_EXECUTION_STATUS_CANCELED
 	case modelStatusFailed:
 		return enumspb.NEXUS_OPERATION_EXECUTION_STATUS_FAILED
 	case modelStatusTerminated:
