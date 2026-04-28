@@ -444,6 +444,7 @@ func (s *PollerScalingIntegSuite) TestPollerScalingLightlyUsedQueueScalesDown() 
 		pollResp, pollErr := s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
 			Namespace: s.Namespace().String(),
 			TaskQueue: &taskqueuepb.TaskQueue{Name: tq, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+			Identity:  "test-poller",
 		})
 		pollResultCh <- pollResult{resp: pollResp, err: pollErr}
 	}()
@@ -504,6 +505,7 @@ func (s *PollerScalingIntegSuite) TestPollerScalingFIFODispatchPreventsScaleDown
 		resp, err := s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
 			Namespace: s.Namespace().String(),
 			TaskQueue: &taskqueuepb.TaskQueue{Name: tq, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+			Identity:  "older-poller",
 		})
 		olderCh <- pollResult{resp: resp, err: err}
 	}()
@@ -525,6 +527,7 @@ func (s *PollerScalingIntegSuite) TestPollerScalingFIFODispatchPreventsScaleDown
 		resp, err := s.FrontendClient().PollWorkflowTaskQueue(ctx, &workflowservice.PollWorkflowTaskQueueRequest{
 			Namespace: s.Namespace().String(),
 			TaskQueue: &taskqueuepb.TaskQueue{Name: tq, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+			Identity:  "newer-poller",
 		})
 		newerCh <- pollResult{resp: resp, err: err}
 	}()
