@@ -61,6 +61,9 @@ type (
 		// it pinned until newlyWrittenTasks are processed.
 		ackLevelPinnedByWriter bool
 
+		// diagnostic tracing for write-path mergeTasksLocked (INC-1722)
+		tracer writePathTracer
+
 		// gc state
 		inGC       bool
 		numToGC    int       // counts approximately how many tasks we can delete with a GC
@@ -86,7 +89,7 @@ func newFairTaskReader(
 	subqueue subqueueIndex,
 	initialAckLevel fairLevel,
 ) *fairTaskReader {
-	return &fairTaskReader{
+	tr := &fairTaskReader{
 		backlogMgr: backlogMgr,
 		subqueue:   subqueue,
 		logger:     backlogMgr.logger,
@@ -114,6 +117,11 @@ func newFairTaskReader(
 		// gc state
 		lastGCTime: time.Now(),
 	}
+	tr.tracer = writePathTracer{
+		logger:  tr.logger,
+		enabled: tr.shouldWritePathRecovery,
+	}
+	return tr
 }
 
 func (tr *fairTaskReader) Start() {
@@ -404,6 +412,21 @@ func (tr *fairTaskReader) mergeTasks(tasks []*persistencespb.AllocatedTaskInfo, 
 
 // nolint:revive,cognitive-complexity // will be simplified in the future
 func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTaskInfo, mode mergeMode) []*internalTask {
+	// Start trace for write-path calls (gated by dynamic config + cap).
+	var trace *writePathTrace
+	if mode == mergeWrite {
+		trace = tr.tracer.begin(writePathTraceState{
+			atEnd:       tr.atEnd,
+			loadedTasks: tr.loadedTasks,
+			readLevel:   tr.readLevel,
+			ackLevel:    tr.ackLevel,
+			readPending: tr.readPending,
+		})
+		if trace != nil {
+			trace.inputTasks = len(tasks)
+		}
+	}
+
 	// Collect (1) currently loaded tasks in the matcher plus (2) the tasks we just read/wrote; sorted by level.
 
 	// (1) Note these values are *internalTask.
@@ -417,17 +440,29 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		if !tr.ackLevel.less(level) {
 			// Reads may race with completes/acks such that we read some tasks that are already
 			// acked. We should ignore these.
+			if trace != nil {
+				trace.filteredBelowAck++
+			}
 			continue
 		} else if mode == mergeWrite && !tr.atEnd && tr.readLevel.less(level) {
 			// If we're writing and we're not at the end, then we have to ignore tasks
 			// above readLevel since we don't know what's in between readLevel and there.
+			if trace != nil {
+				trace.filteredAboveReadLevel++
+			}
 			continue
 		} else if _, have := tr.outstandingTasks.Get(level); have {
 			// If write/read race or we have to re-read a range, we may read something we had
 			// already added to the matcher or acked. Ignore tasks we already have.
+			if trace != nil {
+				trace.filteredDupe++
+			}
 			continue
 		} else if _, have := tr.evictedAcks.Delete(level); have {
 			// This task was already acked but the ack was evicted. Skip it.
+			if trace != nil {
+				trace.filteredEvictedAck++
+			}
 			continue
 		}
 		merged.Put(level, t)
@@ -436,6 +471,10 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 	// Take as many of those as we want to keep in memory. The ones that are not already in the
 	// matcher, we have to add to the matcher.
 	batchSize := tr.backlogMgr.config.GetTasksBatchSize()
+	if trace != nil {
+		trace.batchSize = batchSize
+		trace.mergedSetSize = merged.Size()
+	}
 	it := merged.Iterator()
 	var highestLevel fairLevel
 	tasks = tasks[:0] // reuse incoming slice to avoid an allocation
@@ -466,6 +505,9 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 			tr.loadedTasks--
 			softassert.That(tr.logger, tr.loadedTasks >= 0, "loadedTasks went negative")
 			tr.outstandingTasks.Remove(it.Key().(fairLevel))
+			if trace != nil {
+				trace.tasksEvicted++
+			}
 
 			// Note that the task may have already been matched and removed from the matcher,
 			// but not completed yet. In that case this will be a noop. See comment at the top
@@ -485,6 +527,9 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		level := k.(fairLevel) //nolint:revive
 		tr.outstandingTasks.Remove(level)
 		tr.evictedAcks.Set(level)
+		if trace != nil {
+			trace.acksEvicted++
+		}
 	})
 	// Trim the cache to max size by removing highest levels.
 	for tr.evictedAcks.Len() > evictedAcksCacheSize {
@@ -501,6 +546,9 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 			tr.outstandingTasks.Put(level, nil)
 			metrics.ExpiredTasksPerTaskQueueCounter.With(tr.backlogMgr.metricsHandler).Record(1, metrics.TaskExpireStageReadTag)
 			hasExpired = true
+			if trace != nil {
+				trace.expired++
+			}
 			continue
 		}
 		task := newInternalTaskFromBacklog(t, tr.completeTask)
@@ -511,6 +559,9 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		tr.loadedTasks++
 		tr.backlogAge.record(t.Data.CreateTime, 1)
 		internalTasks = append(internalTasks, task)
+		if trace != nil {
+			trace.tasksAdded++
+		}
 	}
 
 	if hasExpired {
@@ -533,6 +584,15 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 	if count := tr.knownCountLocked(); count >= 0 {
 		tr.backlogMgr.db.setKnownFairBacklogCount(tr.subqueue, count)
 	}
+
+	// Emit trace with after-state.
+	trace.emit(writePathTraceState{
+		atEnd:       tr.atEnd,
+		loadedTasks: tr.loadedTasks,
+		readLevel:   tr.readLevel,
+		ackLevel:    tr.ackLevel,
+		readPending: tr.readPending,
+	})
 
 	return internalTasks
 
