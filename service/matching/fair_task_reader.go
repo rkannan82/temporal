@@ -60,8 +60,8 @@ type (
 		// it pinned until newlyWrittenTasks are processed.
 		ackLevelPinnedByWriter bool
 
-		// diagnostic tracing for write-path mergeTasksLocked (INC-1722)
-		tracer writePathTracer
+		// diagnostic tracing for write-path mergeTasksLocked
+		tracer writeTaskTracer
 
 		// gc state
 		inGC       bool
@@ -116,9 +116,8 @@ func newFairTaskReader(
 		// gc state
 		lastGCTime: time.Now(),
 	}
-	tr.tracer = writePathTracer{
-		logger:  tr.logger,
-		enabled: func() bool { return tr.backlogMgr.config.ForceReadTasksOnWrite() },
+	tr.tracer = writeTaskTracer{
+		logger: tr.logger,
 	}
 	return tr
 }
@@ -397,9 +396,12 @@ func (tr *fairTaskReader) mergeTasks(tasks []*persistencespb.AllocatedTaskInfo, 
 	// and nothing will trigger a read. The root cause is still under investigation.
 	if mode == mergeWrite && !tr.atEnd && tr.loadedTasks == 0 && !tr.readPending && tr.backoffTimer == nil {
 		metrics.FairReaderStuckDetected.With(tr.backlogMgr.metricsHandler).Record(1)
+		tr.tracer.dumpOnStuck()
 		if tr.backlogMgr.config.ForceReadTasksOnWrite() {
 			tr.maybeReadTasksLocked()
 		}
+	} else if mode == mergeWrite {
+		tr.tracer.clearStuck()
 	}
 
 	// unlock before calling addTaskToMatcher
@@ -412,19 +414,10 @@ func (tr *fairTaskReader) mergeTasks(tasks []*persistencespb.AllocatedTaskInfo, 
 
 // nolint:revive,cognitive-complexity // will be simplified in the future
 func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTaskInfo, mode mergeMode) []*internalTask {
-	// Start trace for write-path calls (gated by dynamic config + cap).
-	var trace *writePathTrace
+	// Record write-path merge in ring buffer for stuck-state diagnostics.
+	var trace *writeTraceEntry
 	if mode == mergeWrite {
-		trace = tr.tracer.begin(writePathTraceState{
-			atEnd:       tr.atEnd,
-			loadedTasks: tr.loadedTasks,
-			readLevel:   tr.readLevel,
-			ackLevel:    tr.ackLevel,
-			readPending: tr.readPending,
-		})
-		if trace != nil {
-			trace.inputTasks = len(tasks)
-		}
+		trace = tr.tracer.begin(tr.atEnd, tr.loadedTasks)
 	}
 
 	// Collect (1) currently loaded tasks in the matcher plus (2) the tasks we just read/wrote; sorted by level.
@@ -440,9 +433,6 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		if !tr.ackLevel.less(level) {
 			// Reads may race with completes/acks such that we read some tasks that are already
 			// acked. We should ignore these.
-			if trace != nil {
-				trace.filteredBelowAck++
-			}
 			continue
 		} else if mode == mergeWrite && !tr.atEnd && tr.readLevel.less(level) {
 			// If we're writing and we're not at the end, then we have to ignore tasks
@@ -454,15 +444,9 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		} else if _, have := tr.outstandingTasks.Get(level); have {
 			// If write/read race or we have to re-read a range, we may read something we had
 			// already added to the matcher or acked. Ignore tasks we already have.
-			if trace != nil {
-				trace.filteredDupe++
-			}
 			continue
 		} else if _, have := tr.evictedAcks.Delete(level); have {
 			// This task was already acked but the ack was evicted. Skip it.
-			if trace != nil {
-				trace.filteredEvictedAck++
-			}
 			continue
 		}
 		merged.Put(level, t)
@@ -473,7 +457,6 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 	batchSize := tr.backlogMgr.config.GetTasksBatchSize()
 	if trace != nil {
 		trace.batchSize = batchSize
-		trace.mergedSetSize = merged.Size()
 	}
 	it := merged.Iterator()
 	var highestLevel fairLevel
@@ -527,9 +510,6 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		level := k.(fairLevel) //nolint:revive
 		tr.outstandingTasks.Remove(level)
 		tr.evictedAcks.Set(level)
-		if trace != nil {
-			trace.acksEvicted++
-		}
 	})
 	// Trim the cache to max size by removing highest levels.
 	for tr.evictedAcks.Len() > evictedAcksCacheSize {
@@ -546,9 +526,6 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 			tr.outstandingTasks.Put(level, nil)
 			metrics.ExpiredTasksPerTaskQueueCounter.With(tr.backlogMgr.metricsHandler).Record(1, metrics.TaskExpireStageReadTag)
 			hasExpired = true
-			if trace != nil {
-				trace.expired++
-			}
 			continue
 		}
 		task := newInternalTaskFromBacklog(t, tr.completeTask)
@@ -559,9 +536,6 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		tr.loadedTasks++
 		tr.backlogAge.record(t.Data.CreateTime, 1)
 		internalTasks = append(internalTasks, task)
-		if trace != nil {
-			trace.tasksAdded++
-		}
 	}
 
 	if hasExpired {
@@ -585,14 +559,10 @@ func (tr *fairTaskReader) mergeTasksLocked(tasks []*persistencespb.AllocatedTask
 		tr.backlogMgr.db.setKnownFairBacklogCount(tr.subqueue, count)
 	}
 
-	// Emit trace with after-state.
-	trace.emit(writePathTraceState{
-		atEnd:       tr.atEnd,
-		loadedTasks: tr.loadedTasks,
-		readLevel:   tr.readLevel,
-		ackLevel:    tr.ackLevel,
-		readPending: tr.readPending,
-	})
+	// Advance ring buffer with after-state.
+	if trace != nil {
+		tr.tracer.advance(trace, tr.atEnd, tr.loadedTasks)
+	}
 
 	return internalTasks
 
