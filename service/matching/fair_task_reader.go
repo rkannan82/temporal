@@ -118,7 +118,7 @@ func newFairTaskReader(
 	}
 	tr.tracer = writePathTracer{
 		logger:  tr.logger,
-		enabled: tr.shouldWritePathRecovery,
+		enabled: func() bool { return tr.backlogMgr.config.ForceReadTasksOnWrite() },
 	}
 	return tr
 }
