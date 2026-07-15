@@ -275,6 +275,8 @@ func GrpcServerOptionsProvider(
 	}
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		// Order of interceptors is important
+		// Panic recovery interceptor must be the outermost to catch panics from any inner interceptor or handler
+		interceptor.PanicRecoveryInterceptor(logger),
 		// Mask error interceptor should be the most outer interceptor since it handle the errors format
 		// Service Error Interceptor should be the next most outer interceptor on error handling
 		maskInternalErrorDetailsInterceptor.Intercept,

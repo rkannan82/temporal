@@ -158,6 +158,7 @@ func GrpcServerOptionsProvider(
 
 func getUnaryInterceptors(params GrpcServerOptionsParams) []grpc.UnaryServerInterceptor {
 	interceptors := []grpc.UnaryServerInterceptor{
+		interceptor.PanicRecoveryInterceptor(params.Logger),
 		params.ServiceErrorInterceptor.Intercept,
 		metrics.NewServerMetricsContextInjectorInterceptor(),
 		metrics.NewServerMetricsTrailerPropagatorInterceptor(params.Logger),
