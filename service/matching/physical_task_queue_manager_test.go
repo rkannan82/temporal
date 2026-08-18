@@ -582,14 +582,28 @@ func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingBacklogFallsThruToSca
 }
 
 func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingHoldOnTaskQueueRateLimited() {
-	// Task queue rate limit is active with backlog: no scale-up (bottleneck is rate limit, not pollers).
+	// Long poll + backlog task + rate limit active: suppress -1 (backlog), then hold instead of +1 (rate limited).
 	fakeStats := &taskqueuepb.TaskQueueStats{
 		ApproximateBacklogCount: 100,
 		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
 		RateLimitingActive:      true,
 	}
-	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), enumsspb.TASK_SOURCE_HISTORY, func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now().Add(-2*time.Second), enumsspb.TASK_SOURCE_DB_BACKLOG, func() *taskqueuepb.TaskQueueStats { return fakeStats })
 	s.Nil(decision)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricTaskQueueRateLimited() {
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+		RateLimitingActive:      true,
+	}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now().Add(-2*time.Second), enumsspb.TASK_SOURCE_DB_BACKLOG, func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.assertPollerScaleDecision(capture, metrics.PollerScaleDecisionHold, metrics.PollerScaleReasonTaskQueueRateLimited)
 }
 
 func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionsAreRateLimited() {
