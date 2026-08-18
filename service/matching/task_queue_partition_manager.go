@@ -853,9 +853,10 @@ func (pm *taskQueuePartitionManagerImpl) PollTask(
 			// Forwarded tasks carry the remote partition's scaling decision in the
 			// embedded response. The local partition doesn't make its own decision.
 			if pm.partition.Kind() == enumspb.TASK_QUEUE_KIND_STICKY {
-				// For sticky queues, the remote decision comes from a normal partition
-				// and is not applicable — strip it so the worker doesn't receive a
-				// wrong-queue signal.
+				// Priority backlog forwarding can send sticky polls to a normal
+				// partition. The remote decision comes from that normal partition
+				// and is not applicable — strip it so the worker doesn't receive
+				// a wrong-queue signal.
 				if resp := task.pollWorkflowTaskQueueResponse(); resp != nil {
 					resp.PollerScalingDecision = nil
 				}
