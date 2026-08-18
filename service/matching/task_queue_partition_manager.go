@@ -849,12 +849,16 @@ func (pm *taskQueuePartitionManagerImpl) PollTask(
 
 	task, err := dbq.PollTask(ctx, pollMetadata)
 	if task != nil {
-		if task.isStarted() && pm.partition.Kind() == enumspb.TASK_QUEUE_KIND_STICKY {
-			// Don't attach any scaling decision for forwarded sticky polls. The scaling
-			// decision comes from the normal queue and is not applicable to the sticky
-			// queue as they are independent.
-			if resp := task.pollWorkflowTaskQueueResponse(); resp != nil {
-				resp.PollerScalingDecision = nil
+		if task.isStarted() {
+			// Forwarded tasks carry the remote partition's scaling decision in the
+			// embedded response. The local partition doesn't make its own decision.
+			if pm.partition.Kind() == enumspb.TASK_QUEUE_KIND_STICKY {
+				// For sticky queues, the remote decision comes from a normal partition
+				// and is not applicable — strip it so the worker doesn't receive a
+				// wrong-queue signal.
+				if resp := task.pollWorkflowTaskQueueResponse(); resp != nil {
+					resp.PollerScalingDecision = nil
+				}
 			}
 		} else {
 			task.pollerScalingDecision = dbq.MakePollerScalingDecision(ctx, pollMetadata.localPollStartTime, task.source)
