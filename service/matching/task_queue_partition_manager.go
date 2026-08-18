@@ -849,7 +849,16 @@ func (pm *taskQueuePartitionManagerImpl) PollTask(
 
 	task, err := dbq.PollTask(ctx, pollMetadata)
 	if task != nil {
-		task.pollerScalingDecision = dbq.MakePollerScalingDecision(ctx, pollMetadata.localPollStartTime)
+		if task.isStarted() && pm.partition.Kind() == enumspb.TASK_QUEUE_KIND_STICKY {
+			// Don't attach any scaling decision for forwarded sticky polls. The scaling
+			// decision comes from the normal queue and is not applicable to the sticky
+			// queue as they are independent.
+			if resp := task.pollWorkflowTaskQueueResponse(); resp != nil {
+				resp.PollerScalingDecision = nil
+			}
+		} else {
+			task.pollerScalingDecision = dbq.MakePollerScalingDecision(ctx, pollMetadata.localPollStartTime, task.source)
+		}
 	}
 
 	// Update poller timestamp when poll ends, unless cancelled (e.g., shutdown/disconnect).
