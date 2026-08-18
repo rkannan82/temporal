@@ -894,8 +894,8 @@ func (c *physicalTaskQueueManagerImpl) makePollerScalingDecisionImpl(
 	statsFn func() *taskqueuepb.TaskQueueStats,
 ) *taskqueuepb.PollerScalingDecision {
 	pollWaitTime := c.partitionMgr.engine.timeSource.Since(pollStartTime)
-	// Only suggest scaling down for non-backlog tasks. Sync-matched tasks have
-	// single-digit millisecond latency, so a long wait means the poller was genuinely
+	// Only suggest scaling down for non-backlog tasks. Sync-matched tasks typically have
+	// tens of milliseconds latency, so a long wait means the poller was genuinely
 	// idle — there are more pollers than needed. For backlog tasks, the wait most likely
 	// comes from the DB read path (write → reader → matcher), not excess pollers. Skip
 	// the scale-down and fall through to the scale-up checks below.
