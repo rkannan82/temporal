@@ -62,7 +62,6 @@ import (
 	"go.temporal.io/server/common/searchattribute/sadefs"
 	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"go.temporal.io/server/common/softassert"
-	"go.temporal.io/server/common/tasktoken"
 	"go.temporal.io/server/common/util"
 	"go.temporal.io/server/common/worker_versioning"
 	"go.temporal.io/server/service/history/configs"
@@ -4790,19 +4789,17 @@ func (ms *MutableStateImpl) GenerateActivityCancelCommandsForClose() error {
 		return nil
 	}
 
-	serializer := tasktoken.NewSerializer()
 	wfKey := ms.GetWorkflowKey()
-	nsID := ms.GetNamespaceEntry().ID().String()
 
-	commandsByQueue := make(map[string][]*workerpb.WorkerCommand)
+	// Collect distinct control queues that have activities eligible for cancel.
+	// The task is just a trigger — commands are reconstructed from mutable state
+	// at dispatch time.
+	controlQueues := make(map[string]struct{})
 	for _, ai := range ms.pendingActivityInfoIDs {
-		// No control queue means the activity was started before this feature was deployed.
 		if ai.WorkerControlTaskQueue == "" {
 			continue
 		}
 		if ai.StartedClock == nil {
-			// StartedClock is nil when the activity is not currently started (e.g. in retry backoff)
-			// or was started before this feature was deployed. Skip cancel command.
 			ms.logger.Debug("Skipping worker cancel command: activity not currently started",
 				tag.WorkflowNamespaceID(wfKey.NamespaceID),
 				tag.WorkflowID(wfKey.WorkflowID),
@@ -4811,39 +4808,11 @@ func (ms *MutableStateImpl) GenerateActivityCancelCommandsForClose() error {
 			)
 			continue
 		}
-
-		taskToken, err := serializer.Serialize(tasktoken.NewActivityTaskToken(
-			nsID,
-			wfKey.WorkflowID,
-			wfKey.RunID,
-			ai.ScheduledEventId,
-			ai.ActivityId,
-			ai.ActivityType.GetName(),
-			ai.Attempt,
-			ai.StartedClock,
-			ai.Version,
-			ai.StartVersion,
-			nil,
-			0,
-		))
-		if err != nil {
-			return err
-		}
-
-		commandsByQueue[ai.WorkerControlTaskQueue] = append(
-			commandsByQueue[ai.WorkerControlTaskQueue],
-			&workerpb.WorkerCommand{
-				Type: &workerpb.WorkerCommand_CancelActivity{
-					CancelActivity: &workerpb.CancelActivityCommand{
-						TaskToken: taskToken,
-					},
-				},
-			},
-		)
+		controlQueues[ai.WorkerControlTaskQueue] = struct{}{}
 	}
 
-	for controlQueue, commands := range commandsByQueue {
-		if err := ms.AddWorkerCommandsTasks(commands, controlQueue); err != nil {
+	for controlQueue := range controlQueues {
+		if err := ms.AddWorkerCommandsTasks(nil, controlQueue); err != nil {
 			return err
 		}
 	}

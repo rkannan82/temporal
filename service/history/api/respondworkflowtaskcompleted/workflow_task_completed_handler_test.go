@@ -533,39 +533,19 @@ func (l testWorkflowLibrary) EventDefinitions() []chasmworkflow.EventDefinition 
 func TestFlushWorkerCommandsTasks(t *testing.T) {
 	t.Parallel()
 
-	token1 := []byte("token1")
-	token2 := []byte("token2")
-	token3 := []byte("token3")
-	token4 := []byte("token4")
-
-	makeCommands := func(tokens ...[]byte) []*workerpb.WorkerCommand {
-		commands := make([]*workerpb.WorkerCommand, 0, len(tokens))
-		for _, token := range tokens {
-			commands = append(commands, &workerpb.WorkerCommand{
-				Type: &workerpb.WorkerCommand_CancelActivity{
-					CancelActivity: &workerpb.CancelActivityCommand{
-						TaskToken: token,
-					},
-				},
-			})
-		}
-		return commands
-	}
-
-	t.Run("batches commands by control queue", func(t *testing.T) {
+	t.Run("creates task for control queue", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		ms := historyi.NewMockMutableState(ctrl)
 
-		expectedCommands := makeCommands(token1, token2, token3)
 		ms.EXPECT().AddWorkerCommandsTasks(
-			expectedCommands,
+			([]*workerpb.WorkerCommand)(nil),
 			"control-queue-1",
 		).Return(nil).Times(1)
 
 		handler := &workflowTaskCompletedHandler{
 			mutableState: ms,
-			pendingWorkerCommandsByControlQueue: map[string][]*workerpb.WorkerCommand{
-				"control-queue-1": expectedCommands,
+			pendingWorkerCommandControlQueues: map[string]struct{}{
+				"control-queue-1": {},
 			},
 		}
 
@@ -577,28 +557,28 @@ func TestFlushWorkerCommandsTasks(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		ms := historyi.NewMockMutableState(ctrl)
 
-		calls := make(map[string][]*workerpb.WorkerCommand)
+		queues := make(map[string]bool)
 		ms.EXPECT().AddWorkerCommandsTasks(
-			gomock.Any(),
+			([]*workerpb.WorkerCommand)(nil),
 			gomock.Any(),
 		).DoAndReturn(func(commands []*workerpb.WorkerCommand, queue string) error {
-			calls[queue] = commands
+			queues[queue] = true
 			return nil
 		}).Times(2)
 
 		handler := &workflowTaskCompletedHandler{
 			mutableState: ms,
-			pendingWorkerCommandsByControlQueue: map[string][]*workerpb.WorkerCommand{
-				"control-queue-1": makeCommands(token1, token2),
-				"control-queue-2": makeCommands(token3, token4),
+			pendingWorkerCommandControlQueues: map[string]struct{}{
+				"control-queue-1": {},
+				"control-queue-2": {},
 			},
 		}
 
 		err := handler.flushWorkerCommandsTasks()
 		require.NoError(t, err)
 
-		require.Len(t, calls["control-queue-1"], 2)
-		require.Len(t, calls["control-queue-2"], 2)
+		require.True(t, queues["control-queue-1"])
+		require.True(t, queues["control-queue-2"])
 	})
 
 	t.Run("does nothing when no pending commands", func(t *testing.T) {
@@ -606,8 +586,8 @@ func TestFlushWorkerCommandsTasks(t *testing.T) {
 		ms := historyi.NewMockMutableState(ctrl)
 
 		handler := &workflowTaskCompletedHandler{
-			mutableState:                        ms,
-			pendingWorkerCommandsByControlQueue: nil,
+			mutableState:                      ms,
+			pendingWorkerCommandControlQueues: nil,
 		}
 
 		err := handler.flushWorkerCommandsTasks()
@@ -959,9 +939,12 @@ func TestHandleCommandRequestCancelActivity_WorkerCommands(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		// Activities 1 and 3 (with clock) should produce commands; activity 2 (nil clock) should be skipped.
-		require.Len(t, handler.pendingWorkerCommandsByControlQueue[controlQueue], 2,
-			"only activities with StartedClock should produce cancel commands")
+		// Activities 1 and 3 (with clock) are eligible; activity 2 (nil clock) is skipped.
+		// Commands are no longer stored inline — only the control queue key is recorded.
+		// The executor reconstructs commands from mutable state at dispatch time.
+		_, hasQueue := handler.pendingWorkerCommandControlQueues[controlQueue]
+		require.True(t, hasQueue,
+			"control queue should be registered for eligible activities")
 	})
 
 	t.Run("started activity without control queue does not collect worker command", func(t *testing.T) {
@@ -994,6 +977,6 @@ func TestHandleCommandRequestCancelActivity_WorkerCommands(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Equal(t, cancelReqEvent, event)
-		require.Empty(t, handler.pendingWorkerCommandsByControlQueue)
+		require.Empty(t, handler.pendingWorkerCommandControlQueues)
 	})
 }

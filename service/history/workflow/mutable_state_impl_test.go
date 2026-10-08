@@ -8941,12 +8941,17 @@ func TestGenerateActivityCancelCommandsForClose(t *testing.T) {
 				}
 			}
 
-			// Verify each expected queue got the right number of commands
-			tasksByQueue := make(map[string]int)
+			// Verify a task was generated for each expected control queue.
+			// Commands are no longer persisted — they are reconstructed from
+			// mutable state at dispatch time.
+			taskQueues := make(map[string]bool)
 			for _, wct := range workerCommandTasks {
-				tasksByQueue[wct.Destination] = len(wct.Commands)
+				taskQueues[wct.Destination] = true
 			}
-			require.Equal(t, tc.expectedQueues, tasksByQueue)
+			for queue := range tc.expectedQueues {
+				require.True(t, taskQueues[queue], "expected task for queue %s", queue)
+			}
+			require.Len(t, taskQueues, len(tc.expectedQueues))
 		})
 	}
 }

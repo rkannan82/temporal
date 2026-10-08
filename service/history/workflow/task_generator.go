@@ -587,7 +587,7 @@ func (r *TaskGeneratorImpl) GenerateWorkerCommandsTasks(commands []*workerpb.Wor
 		return nil
 	}
 
-	if len(commands) == 0 || controlQueue == "" {
+	if controlQueue == "" {
 		return nil
 	}
 

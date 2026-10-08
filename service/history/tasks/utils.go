@@ -78,6 +78,8 @@ func GetTransferTaskEventID(
 		eventID = common.FirstEventID
 	case *ChasmTask:
 		return getChasmTaskEventID()
+	case *WorkerCommandsTask:
+		return getChasmTaskEventID()
 	case *FakeTask:
 		// no-op
 	default:

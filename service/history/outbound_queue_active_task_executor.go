@@ -6,6 +6,7 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	workerpb "go.temporal.io/api/worker/v1"
 	"go.temporal.io/server/chasm"
 	"go.temporal.io/server/common/debug"
 	"go.temporal.io/server/common/log"
@@ -117,7 +118,11 @@ func (e *outboundQueueActiveTaskExecutor) Execute(
 			workercommands.RecordCommandMetrics(task.Commands, e.metricsHandler, namespaceTag.Value, "max_attempts_exceeded")
 			return respond(nil)
 		}
-		return respond(e.workerCommandsDispatcher.Execute(ctx, task, namespaceTag.Value))
+		commands, err := e.buildWorkerCommands(ctx, task)
+		if err != nil {
+			return respond(err)
+		}
+		return respond(e.workerCommandsDispatcher.Execute(ctx, task, commands, namespaceTag.Value))
 	}
 
 	return respond(queueserrors.NewUnprocessableTaskError(fmt.Sprintf("unknown task type '%T'", task)))
@@ -154,6 +159,31 @@ func (e *outboundQueueActiveTaskExecutor) executeChasmSideEffectTask(
 		task,
 	)
 	return err
+}
+
+// buildWorkerCommands loads mutable state under the workflow lock, builds
+// fully populated commands, then releases the lock before returning.
+func (e *outboundQueueActiveTaskExecutor) buildWorkerCommands(
+	ctx context.Context,
+	task *tasks.WorkerCommandsTask,
+) ([]*workerpb.WorkerCommand, error) {
+	weContext, release, err := getWorkflowExecutionContextForTask(ctx, e.shardContext, e.cache, task)
+	if err != nil {
+		return nil, err
+	}
+
+	ms, err := loadMutableStateForTransferTask(ctx, e.shardContext, weContext, task, e.metricsHandler, e.logger)
+	if err != nil {
+		release(err)
+		return nil, err
+	}
+
+	commands, err := workercommands.BuildCommands(task, ms)
+	release(nil)
+	if err != nil {
+		return nil, err
+	}
+	return commands, nil
 }
 
 func (e *outboundQueueActiveTaskExecutor) executeStateMachineTask(

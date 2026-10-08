@@ -1150,11 +1150,11 @@ func TestGenerateWorkerCommandsTasks(t *testing.T) {
 			expectTask:     false,
 		},
 		{
-			name:           "no task when commands empty",
+			name:           "task created even when commands empty",
 			featureEnabled: true,
 			commands:       []*workerpb.WorkerCommand{},
 			controlQueue:   "test-control-queue",
-			expectTask:     false,
+			expectTask:     true,
 		},
 		{
 			name:           "no task when controlQueue empty",

@@ -71,6 +71,7 @@ func NewDispatcher(
 func (d *Dispatcher) Execute(
 	ctx context.Context,
 	task *tasks.WorkerCommandsTask,
+	commands []*workerpb.WorkerCommand,
 	namespaceName string,
 ) error {
 	if !d.config.EnableCancelActivityWorkerCommand(namespaceName) {
@@ -79,28 +80,29 @@ func (d *Dispatcher) Execute(
 			tag.WorkflowID(task.WorkflowID),
 			tag.WorkflowRunID(task.RunID),
 			tag.NewStringTag("control_queue", task.Destination),
-			tag.NewInt("command_count", len(task.Commands)),
+			tag.NewInt("command_count", len(commands)),
 		)
 		return nil
 	}
 
-	if len(task.Commands) == 0 {
+	if len(commands) == 0 {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, d.config.WorkerCommandsDispatchTimeout())
 	defer cancel()
 
-	return d.dispatchToWorker(ctx, task, namespaceName)
+	return d.dispatchToWorker(ctx, task, commands, namespaceName)
 }
 
 func (d *Dispatcher) dispatchToWorker(
 	ctx context.Context,
 	task *tasks.WorkerCommandsTask,
+	commands []*workerpb.WorkerCommand,
 	namespaceName string,
 ) error {
 	request := &workerservicepb.ExecuteCommandsRequest{
-		Commands: task.Commands,
+		Commands: commands,
 	}
 	// Encode as binary/protobuf using the standard Temporal payload format.
 	// Worker commands are handled directly by SDK Core (not by lang-SDK Nexus handlers),
@@ -138,27 +140,27 @@ func (d *Dispatcher) dispatchToWorker(
 		Request: nexusRequest,
 	})
 	if err != nil {
-		d.recordCommandMetrics(task.Commands, namespaceName, "rpc_error")
+		d.recordCommandMetrics(commands, namespaceName, "rpc_error")
 		return fmt.Errorf("failed to dispatch worker commands to control queue %s: %w", task.Destination, err)
 	}
 
 	nexusErr := commonnexus.MatchingDispatchResponseToError(resp)
 	if nexusErr == nil {
-		d.recordCommandMetrics(task.Commands, namespaceName, "success")
+		d.recordCommandMetrics(commands, namespaceName, "success")
 		return nil
 	}
 
-	return d.handleError(nexusErr, task, namespaceName)
+	return d.handleError(nexusErr, task, commands, namespaceName)
 }
 
-func (d *Dispatcher) handleError(nexusErr error, task *tasks.WorkerCommandsTask, namespaceName string) error {
+func (d *Dispatcher) handleError(nexusErr error, task *tasks.WorkerCommandsTask, commands []*workerpb.WorkerCommand, namespaceName string) error {
 	if handlerErr, ok := errors.AsType[*nexus.HandlerError](nexusErr); ok {
 		// Handler-level error (transport, timeout, internal). These are constructed by
 		// MatchingDispatchResponseToError for non-worker-returned failures.
 		if handlerErr.Type == nexus.HandlerErrorTypeUpstreamTimeout {
 			d.logger.Debug("No worker polling control queue, dropping command",
 				tag.NewStringTag("control_queue", task.Destination))
-			d.recordCommandMetrics(task.Commands, namespaceName, "no_poller")
+			d.recordCommandMetrics(commands, namespaceName, "no_poller")
 			// Don't retry — if no poller appeared within the dispatch timeout, the worker
 			// is likely gone.
 			return nil
@@ -168,14 +170,14 @@ func (d *Dispatcher) handleError(nexusErr error, task *tasks.WorkerCommandsTask,
 			d.logger.Error("Worker commands non-retryable handler error",
 				tag.NewStringTag("control_queue", task.Destination),
 				tag.Error(nexusErr))
-			d.recordCommandMetrics(task.Commands, namespaceName, "non_retryable_error")
+			d.recordCommandMetrics(commands, namespaceName, "non_retryable_error")
 			return nil
 		}
 
 		d.logger.Warn("Worker commands transport failure",
 			tag.NewStringTag("control_queue", task.Destination),
 			tag.Error(nexusErr))
-		d.recordCommandMetrics(task.Commands, namespaceName, "transport_error")
+		d.recordCommandMetrics(commands, namespaceName, "transport_error")
 		return nexusErr
 	}
 
@@ -187,9 +189,9 @@ func (d *Dispatcher) handleError(nexusErr error, task *tasks.WorkerCommandsTask,
 		tag.WorkflowID(task.WorkflowID),
 		tag.WorkflowRunID(task.RunID),
 		tag.NewStringTag("control_queue", task.Destination),
-		tag.NewInt("command_count", len(task.Commands)),
+		tag.NewInt("command_count", len(commands)),
 		tag.Error(nexusErr))
-	d.recordCommandMetrics(task.Commands, namespaceName, "worker_error")
+	d.recordCommandMetrics(commands, namespaceName, "worker_error")
 	return nil
 }
 

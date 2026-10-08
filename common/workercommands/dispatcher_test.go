@@ -23,6 +23,9 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+// testWorkerCommandsTask returns a task with old-format commands (task tokens
+// already populated), so tests exercise the backward-compat path without
+// needing a mock MutableState.
 func testWorkerCommandsTask() *tasks.WorkerCommandsTask {
 	return &tasks.WorkerCommandsTask{
 		WorkflowKey: definition.NewWorkflowKey("test-ns-id", "test-wf-id", "test-run-id"),
@@ -54,7 +57,7 @@ func TestExecute_FeatureFlagOff_DropsTask(t *testing.T) {
 	}
 
 	task := testWorkerCommandsTask()
-	err := d.Execute(context.Background(), task, "test-namespace")
+	err := d.Execute(context.Background(), task, task.Commands, "test-namespace")
 	require.NoError(t, err, "task should be silently dropped when feature flag is off")
 }
 
@@ -67,10 +70,12 @@ func TestExecute_EmptyCommands_DropsTask(t *testing.T) {
 		logger: log.NewNoopLogger(),
 	}
 
-	task := testWorkerCommandsTask()
-	task.Commands = nil
-	err := d.Execute(context.Background(), task, "test-namespace")
-	require.NoError(t, err, "task with no commands should be dropped")
+	task := &tasks.WorkerCommandsTask{
+		WorkflowKey: definition.NewWorkflowKey("test-ns-id", "test-wf-id", "test-run-id"),
+		Destination: "/temporal-sys/worker-commands/test-ns/key1",
+	}
+	err := d.Execute(context.Background(), task, nil, "test-namespace")
+	require.NoError(t, err, "task with no commands should be silently dropped")
 }
 
 func TestExecute_DispatchSuccess(t *testing.T) {
@@ -110,7 +115,7 @@ func TestExecute_DispatchSuccess(t *testing.T) {
 		})
 
 	task := testWorkerCommandsTask()
-	err := d.Execute(context.Background(), task, "test-namespace")
+	err := d.Execute(context.Background(), task, task.Commands, "test-namespace")
 	require.NoError(t, err)
 
 	require.NotNil(t, capturedReq)
@@ -142,7 +147,7 @@ func TestExecute_DispatchRPCError(t *testing.T) {
 		nil, errors.New("connection refused"))
 
 	task := testWorkerCommandsTask()
-	err := d.Execute(context.Background(), task, "test-namespace")
+	err := d.Execute(context.Background(), task, task.Commands, "test-namespace")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "connection refused")
 
@@ -174,7 +179,7 @@ func TestExecute_UpstreamTimeout(t *testing.T) {
 		}, nil)
 
 	task := testWorkerCommandsTask()
-	err := d.Execute(context.Background(), task, "test-namespace")
+	err := d.Execute(context.Background(), task, task.Commands, "test-namespace")
 	require.NoError(t, err, "upstream timeout should not be retried — worker is likely gone")
 
 	requireMetricValue(t, capture.Snapshot(), "no_poller")
@@ -190,10 +195,9 @@ func TestHandleError_WorkerError_ReturnNil(t *testing.T) {
 		logger:         log.NewNoopLogger(),
 	}
 
-	// Worker-returned errors (ApplicationError, CanceledError) are permanent.
 	workerErr := temporal.NewApplicationError("worker bug", "SomeType", nil)
 	task := testWorkerCommandsTask()
-	err := d.handleError(workerErr, task, "test-namespace")
+	err := d.handleError(workerErr, task, task.Commands, "test-namespace")
 	require.NoError(t, err, "worker-returned errors are permanent and should be swallowed")
 
 	requireMetricValue(t, capture.Snapshot(), "worker_error")
@@ -211,7 +215,7 @@ func TestHandleError_UpstreamTimeout_ReturnNil(t *testing.T) {
 
 	handlerErr := nexus.NewHandlerErrorf(nexus.HandlerErrorTypeUpstreamTimeout, "upstream timeout")
 	task := testWorkerCommandsTask()
-	err := d.handleError(handlerErr, task, "test-namespace")
+	err := d.handleError(handlerErr, task, task.Commands, "test-namespace")
 	require.NoError(t, err, "upstream timeout should not be retried — worker is likely gone")
 
 	requireMetricValue(t, capture.Snapshot(), "no_poller")
@@ -229,7 +233,7 @@ func TestHandleError_NonRetryableHandlerError_ReturnNil(t *testing.T) {
 
 	handlerErr := nexus.NewHandlerErrorf(nexus.HandlerErrorTypeBadRequest, "bad request")
 	task := testWorkerCommandsTask()
-	err := d.handleError(handlerErr, task, "test-namespace")
+	err := d.handleError(handlerErr, task, task.Commands, "test-namespace")
 	require.NoError(t, err, "non-retryable handler errors should be swallowed")
 
 	requireMetricValue(t, capture.Snapshot(), "non_retryable_error")
@@ -247,7 +251,7 @@ func TestHandleError_OtherHandlerError_ReturnRetryable(t *testing.T) {
 
 	handlerErr := nexus.NewHandlerErrorf(nexus.HandlerErrorTypeInternal, "something broke")
 	task := testWorkerCommandsTask()
-	err := d.handleError(handlerErr, task, "test-namespace")
+	err := d.handleError(handlerErr, task, task.Commands, "test-namespace")
 	require.Error(t, err, "transport errors should be retried")
 
 	requireMetricValue(t, capture.Snapshot(), "transport_error")
