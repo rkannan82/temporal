@@ -16,6 +16,7 @@ import (
 	chasmworkflow "go.temporal.io/server/chasm/lib/workflow"
 	"go.temporal.io/server/common"
 	commoncache "go.temporal.io/server/common/cache"
+	commoncallbacks "go.temporal.io/server/common/callbacks"
 	"go.temporal.io/server/common/clock"
 	"go.temporal.io/server/common/config"
 	"go.temporal.io/server/common/dynamicconfig"
@@ -25,16 +26,13 @@ import (
 	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/namespace"
 	persistenceClient "go.temporal.io/server/common/persistence/client"
-	"go.temporal.io/server/common/persistence/serialization"
 	"go.temporal.io/server/common/persistence/visibility"
 	"go.temporal.io/server/common/persistence/visibility/manager"
 	"go.temporal.io/server/common/persistence/visibility/store/elasticsearch"
 	"go.temporal.io/server/common/primitives"
 	"go.temporal.io/server/common/quotas/calculator"
-	"go.temporal.io/server/common/resolver"
 	"go.temporal.io/server/common/resource"
 	"go.temporal.io/server/common/rpc/interceptor"
-	"go.temporal.io/server/common/searchattribute"
 	"go.temporal.io/server/common/tasktoken"
 	"go.temporal.io/server/common/testing/testhooks"
 	"go.temporal.io/server/common/worker_versioning"
@@ -74,6 +72,7 @@ var Module = fx.Options(
 	ChasmEngineModule,
 	chasmtests.Module,
 	fx.Provide(CallbackDestinationBlockedProvider),
+	fx.Provide(callbackValidatorProvider),
 	fx.Provide(NexusOperationDestinationBlockedProvider),
 	fx.Provide(ConfigProvider), // might be worth just using provider for configs.Config directly
 	fx.Provide(workflow.NewCommandHandlerRegistry),
@@ -91,6 +90,7 @@ var Module = fx.Options(
 	fx.Provide(HistoryAdditionalInterceptorsProvider),
 	fx.Provide(service.GrpcServerOptionsProvider),
 	fx.Provide(ESProcessorConfigProvider),
+	fx.Provide(VisibilityManagerConfigProvider),
 	fx.Provide(VisibilityManagerProvider),
 	fx.Provide(visibility.ChasmVisibilityManagerProvider),
 	fx.Provide(ThrottledLoggerRpsFnProvider),
@@ -162,6 +162,23 @@ func NexusOperationDestinationBlockedProvider(
 		})
 		return cb.State() != gobreaker.StateClosed
 	}
+}
+
+// callbackValidatorProvider creates a callback Validator using the production dynamic config keys
+// so that existing operator configurations (callback.allowedAddresses) are honored.
+func callbackValidatorProvider(dc *dynamicconfig.Collection, namespaceRegistry namespace.Registry) (commoncallbacks.Validator, error) {
+	cfg := commoncallbacks.ValidatorConfig{
+		MaxCallbacksPerExecution:         callback.MaxPerExecution.Get(dc),
+		TotalCallbacksMaxSize:            callback.TotalMaxSizePerExecution.Get(dc),
+		MaxIDLengthLimit:                 dynamicconfig.MaxIDLengthLimit.Get(dc),
+		URLMaxLength:                     dynamicconfig.FrontendCallbackURLMaxLength.Get(dc),
+		HeaderMaxSize:                    dynamicconfig.FrontendCallbackHeaderMaxSize.Get(dc),
+		EndpointRules:                    callback.AllowedAddresses.Get(dc),
+		MaxServiceNameLength:             chasmnexus.MaxServiceNameLength.Get(dc),
+		MaxOperationNameLength:           chasmnexus.MaxOperationNameLength.Get(dc),
+		NexusHandlerSourceContextMaxSize: callback.NexusHandlerSourceContextMaxSize.Get(dc),
+	}
+	return commoncallbacks.NewValidator(cfg, namespaceRegistry)
 }
 
 func ServerProvider(grpcServerOptions []grpc.ServerOption) *grpc.Server {
@@ -461,43 +478,30 @@ func PersistenceRateLimitingParamsProvider(
 	}
 }
 
-func VisibilityManagerProvider(
-	logger log.Logger,
-	metricsHandler metrics.Handler,
-	persistenceConfig *config.Persistence,
-	customVisibilityStoreFactory visibility.VisibilityStoreFactory,
+func VisibilityManagerConfigProvider(
 	esProcessorConfig *elasticsearch.ProcessorConfig,
 	serviceConfig *configs.Config,
-	persistenceServiceResolver resolver.ServiceResolver,
-	searchAttributesMapperProvider searchattribute.MapperProvider,
-	saProvider searchattribute.Provider,
-	namespaceRegistry namespace.Registry,
-	chasmRegistry *chasm.Registry,
-	serializer serialization.Serializer,
+) *visibility.ManagerConfig {
+	return &visibility.ManagerConfig{
+		EsProcessorConfig: esProcessorConfig,
+
+		MaxReadQPS:                     serviceConfig.VisibilityPersistenceMaxReadQPS,
+		MaxWriteQPS:                    serviceConfig.VisibilityPersistenceMaxWriteQPS,
+		OperatorRPSRatio:               serviceConfig.OperatorRPSRatio,
+		SlowQueryThreshold:             serviceConfig.VisibilityPersistenceSlowQueryThreshold,
+		EnableReadFromSecondary:        serviceConfig.EnableReadFromSecondaryVisibility,
+		EnableShadowReadMode:           serviceConfig.VisibilityEnableShadowReadMode,
+		SecondaryVisibilityWritingMode: serviceConfig.SecondaryVisibilityWritingMode,
+		DisableOrderByClause:           serviceConfig.VisibilityDisableOrderByClause,
+		EnableManualPagination:         serviceConfig.VisibilityEnableManualPagination,
+	}
+}
+
+func VisibilityManagerProvider(
+	managerParams visibility.ManagerParams,
+	managerConfig *visibility.ManagerConfig,
 ) (manager.VisibilityManager, error) {
-	return visibility.NewManager(
-		*persistenceConfig,
-		persistenceServiceResolver,
-		customVisibilityStoreFactory,
-		esProcessorConfig,
-		saProvider,
-		searchAttributesMapperProvider,
-		namespaceRegistry,
-		chasmRegistry,
-		serviceConfig.VisibilityPersistenceMaxReadQPS,
-		serviceConfig.VisibilityPersistenceMaxWriteQPS,
-		serviceConfig.OperatorRPSRatio,
-		serviceConfig.VisibilityPersistenceSlowQueryThreshold,
-		serviceConfig.EnableReadFromSecondaryVisibility,
-		serviceConfig.VisibilityEnableShadowReadMode,
-		serviceConfig.SecondaryVisibilityWritingMode,
-		serviceConfig.VisibilityDisableOrderByClause,
-		serviceConfig.VisibilityEnableManualPagination,
-		serviceConfig.VisibilityEnableUnifiedQueryConverter,
-		metricsHandler,
-		logger,
-		serializer,
-	)
+	return visibility.NewManager(&managerParams, managerConfig)
 }
 
 func ChasmVisibilityManagerProvider(
